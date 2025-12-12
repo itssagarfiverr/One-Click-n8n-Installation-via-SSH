@@ -1,8 +1,3 @@
-Bilkul!
-Yeh lo **pure README.md ka complete source code** — ek hi block me — jise tum **direct copy–paste** kar sakte ho GitHub me.
-
----
-
 # 🚀 One-Click **n8n Automation Platform** Installation (Ubuntu & AlmaLinux)
 
 Easily install **n8n (Open-Source Workflow Automation)** on your **Ubuntu** or **AlmaLinux 8/9/10** server using a single script — complete with:
@@ -42,7 +37,9 @@ Perfect for developers, automation experts, DevOps engineers, and self-hosters!
 ### 📝 Step 1: Connect to your server
 Use SSH:
 
+```bash
 ssh root@your-server-ip
+```
 
 ---
 
@@ -52,7 +49,7 @@ ssh root@your-server-ip
 
 ```bash
 cd /root && \
-curl -o n8n_install.sh https://raw.githubusercontent.com/YOUR_GITHUB/n8n-oneclick/main/n8n_install.sh && \
+curl -o n8n_install.sh https://raw.githubusercontent.com/itssagarfiverr/One-Click-n8n-Installation-via-SSH/refs/heads/main/n8n_install.sh && \
 chmod +x n8n_install.sh && \
 ./n8n_install.sh && \
 rm -f n8n_install.sh
