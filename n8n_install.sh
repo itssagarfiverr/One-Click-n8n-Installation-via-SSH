@@ -1,13 +1,66 @@
 #!/bin/bash
-# GreatHost n8n One-Click Installer (Ubuntu / Debian / AlmaLinux / CentOS / RHEL)
-# Includes sysv-install freeze fix + full ASCII cow banner
+# GreatHost n8n One-Click Installer
+# - Full GreatHost branding (ASCII cow)
+# - Supports: Ubuntu (apt) & AlmaLinux/CentOS/RHEL (dnf)
+# - Docker (non-interactive) + Docker Compose plugin
+# - Postgres (Docker)
+# - n8n (Docker)
+# - Nginx reverse proxy + Certbot (Let's Encrypt) auto
+# - Firewall rules (ufw/firewalld) auto
+# - SELinux adjustments (RHEL-like)
+# - SysV patch to avoid docker installer freeze
+# - Robust error handling and logging
+#
+# Usage:
+#   sudo bash greathost-n8n-installer.sh
+#
+# Author: GreatHost.in (Ritik26)
+# NOTE: Read comments in the file before modifying.
 
-set -eo pipefail
+set -eo pipefail   # don't use -u (it can cause early exit on unset vars)
 
-check() { if [ $? -ne 0 ]; then echo "❌ Error occurred. Exiting."; exit 1; fi; }
+# -----------------------------
+# Configuration / Constants
+# -----------------------------
+LOGFILE="/var/log/greathost-n8n-install.log"
+INSTALL_DIR="/opt/greathost-n8n"
+COMPOSE_FILE="$INSTALL_DIR/docker-compose.yml"
+SYSV_BIN="/usr/lib/systemd/systemd-sysv-install"
+SYSV_BACKUP="${SYSV_BIN}.greathost.bak"
 
+# Colors
+GREEN="\e[32m"
+YELLOW="\e[33m"
+RED="\e[31m"
+RESET="\e[0m"
+
+# Logging helper
+log() {
+  echo -e "[$(date '+%F %T')] $*" | tee -a "$LOGFILE"
+}
+
+# Safe command runner - allow non-fatal with || true when needed
+run() {
+  log "+ $*"
+  if ! eval "$@"; then
+    log "!! Command failed: $*"
+    return 1
+  fi
+  return 0
+}
+
+# check command and exit with message
+fatal() {
+  echo -e "${RED}FATAL:${RESET} $*" | tee -a "$LOGFILE" >&2
+  exit 1
+}
+
+# -----------------------------
+# Branding banner (GreatHost cow)
+# -----------------------------
 clear
 cat <<'EOF'
+
  ____________________________________________________________________
 |                                                                    |
 |    ===========================================                     |
@@ -27,137 +80,189 @@ cat <<'EOF'
 |    ===========================================                     |
 |                                                                    |
 |       Welcome to the n8n One-Click Automated Installer             |
-|  Installs: Docker + Compose + Postgres + n8n + Nginx + SSL         |
+|  Installs: Docker + Compose + Postgres + n8n + Nginx + Let's Encrypt|
 |____________________________________________________________________|
 EOF
 
-echo
+# -----------------------------
+# Pre-checks
+# -----------------------------
+if [ "$(id -u)" -ne 0 ]; then
+  fatal "Please run this script as root (sudo)."
+fi
 
-#########################################
-# USER INPUT
-#########################################
+# Create log file
+touch "$LOGFILE"
+chmod 640 "$LOGFILE"
 
-ask_inputs() {
-  while [ -z "${domain:-}" ]; do
-    read -rp "Your Domain (example.com): " domain
+log "Starting GreatHost n8n installer"
+
+# -----------------------------
+# Ask inputs
+# -----------------------------
+read_input() {
+  # domain
+  while [ -z "${DOMAIN:-}" ]; do
+    read -rp "Enter your domain (example.com) : " DOMAIN
   done
+
+  # email
+  while true; do
+    read -rp "Enter admin email (for Let's Encrypt) : " EMAIL
+    if [[ "$EMAIL" =~ ^[^@]+@[^@]+\.[^@]+$ ]]; then break; fi
+    echo "Please enter a valid email."
+  done
+
+  # basic auth user/pass
+  read -rp "n8n UI username [default: admin]: " N8N_USER
+  N8N_USER=${N8N_USER:-admin}
 
   while true; do
-    read -rp "Admin Email (for SSL): " email
-    if echo "$email" | grep -Eq '^[^@]+@[^@]+\.[^@]+$'; then break; fi
-    echo "Invalid Email ❌"
+    read -rsp "n8n UI password: " p1; echo
+    read -rsp "Confirm password: " p2; echo
+    [ "$p1" = "$p2" ] && break
+    echo "Passwords do not match. Try again."
   done
+  N8N_PASS="$p1"
 
-  read -rp "n8n Username [default admin]: " n8n_user
-  n8n_user=${n8n_user:-admin}
-
-  while true; do
-    read -rsp "n8n Password: " p1; echo
-    read -rsp "Confirm Password: " p2; echo
-    [[ "$p1" == "$p2" ]] && break
-    echo "Passwords do not match ❌"
-  done
-  n8n_pass="$p1"
-
-  read -rp "Timezone (optional, example: Asia/Kolkata): " tz
-  tz=${tz:-}
+  # timezone optional
+  read -rp "Timezone (optional, e.g. Asia/Kolkata) [press Enter to skip]: " TZ_INPUT
+  TZ_INPUT=${TZ_INPUT:-}
 }
 
-ask_inputs
+read_input
 
-while true; do
-  read -rp "Proceed with installation? (Y/n): " ok
-  ok=${ok:-Y}
-  case $ok in
-    [Yy]*) break ;;
-    [Nn]*) unset domain email n8n_user n8n_pass tz; ask_inputs ;;
-    *) echo "Type Y or N" ;;
-  esac
-done
+log "User inputs: domain=$DOMAIN, email=$EMAIL, user=$N8N_USER, timezone=${TZ_INPUT:-'(none)'}"
 
-#########################################
-# OS DETECTION
-#########################################
+# -----------------------------
+# Detect OS family
+# -----------------------------
+OS=""
+ID=""
+VERSION_ID=""
+if [ -f /etc/os-release ]; then
+  . /etc/os-release
+  ID=${ID,,}
+  VERSION_ID=${VERSION_ID}
+  if [[ "$ID" =~ ubuntu|debian ]]; then OS="debian"; fi
+  if [[ "$ID" =~ almalinux|centos|rhel ]]; then OS="rhel"; fi
+fi
 
-. /etc/os-release
+[ -n "$OS" ] || fatal "Unsupported OS. This script supports Ubuntu/Debian and AlmaLinux/CentOS/RHEL."
 
-if echo "$ID" | grep -Eq "ubuntu|debian"; then OS=debian; fi
-if echo "$ID" | grep -Eq "almalinux|centos|rhel"; then OS=rhel; fi
+log "Detected OS: $ID $VERSION_ID -> family: $OS"
 
-echo "Detected OS: $OS"
+# -----------------------------
+# Helper: public IP / DNS check
+# -----------------------------
+get_public_ip() {
+  # try multiple endpoints in case one fails
+  ip=$(curl -fsS --max-time 8 https://ifconfig.co 2>/dev/null || true)
+  ip=${ip:-$(curl -fsS --max-time 8 https://ipinfo.io/ip 2>/dev/null || true)}
+  ip=${ip:-$(curl -fsS --max-time 8 https://api.ipify.org 2>/dev/null || true)}
+  echo "$ip"
+}
 
-#########################################
-# SYSTEM UPDATE
-#########################################
+# validate DNS A record matches public IP
+validate_dns() {
+  log "Validating DNS A record for $DOMAIN"
+  server_ip="$(get_public_ip)"
+  if [ -z "$server_ip" ]; then
+    log "Warning: Could not determine server public IP. Skipping DNS match check."
+    return 0
+  fi
+  dns_ip="$(dig +short A "$DOMAIN" | head -n1 || true)"
+  if [ -z "$dns_ip" ]; then
+    log "Warning: DNS A record for $DOMAIN not found (yet). Please ensure domain points to server IP: $server_ip"
+    return 1
+  fi
+  if [ "$dns_ip" != "$server_ip" ]; then
+    log "Warning: DNS A record ($dns_ip) does not match server IP ($server_ip). Let's proceed but Certbot may fail until DNS updates."
+    return 1
+  fi
+  log "DNS A record matches server IP: $server_ip"
+  return 0
+}
+
+# -----------------------------
+# System update & dependencies
+# -----------------------------
+log "Updating system packages and installing basic dependencies..."
+if [ "$OS" = "debian" ]; then
+  run apt update -y
+  run apt upgrade -y
+  run apt install -y ca-certificates curl gnupg lsb-release apt-transport-https software-properties-common dnsutils
+else
+  run dnf -y update
+  run dnf install -y yum-utils epel-release dnsutils
+fi
+
+# -----------------------------
+# Apply sysv patch (prevent docker freeze)
+# -----------------------------
+if [ -f "$SYSV_BIN" ]; then
+  log "Temporarily backing up $SYSV_BIN to avoid installer freeze..."
+  run mv "$SYSV_BIN" "$SYSV_BACKUP" || true
+fi
+
+# -----------------------------
+# Install Docker (non-interactive)
+# -----------------------------
+log "Installing Docker (non-interactive)..."
 
 if [ "$OS" = "debian" ]; then
-  apt update -y && apt upgrade -y
-  apt install -y ca-certificates curl gnupg lsb-release software-properties-common
-else
-  dnf update -y
-  dnf install -y yum-utils epel-release device-mapper-persistent-data lvm2
-fi
+  run apt remove -y docker docker-engine docker.io containerd runc || true
 
-#########################################
-# SYSV INSTALL FIX (PREVENT DOCKER HANG)
-#########################################
+  run mkdir -p /etc/apt/keyrings
+  run curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg || true
 
-echo "Applying Docker freeze patch..."
-if [ -f /usr/lib/systemd/systemd-sysv-install ]; then
-  mv /usr/lib/systemd/systemd-sysv-install /usr/lib/systemd/systemd-sysv-install.bak 2>/dev/null || true
-fi
-
-#########################################
-# INSTALL DOCKER
-#########################################
-
-echo "Installing Docker..."
-
-if [ "$OS" = "debian" ]; then
-  apt remove -y docker docker-engine docker.io containerd runc || true
-
-  mkdir -p /etc/apt/keyrings
-  curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
-    | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-
-  echo \
-"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
-https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
-  > /etc/apt/sources.list.d/docker.list
-
-  apt update -y
-  DEBIAN_FRONTEND=noninteractive apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin || true
+  arch=$(dpkg --print-architecture)
+  release=$(lsb_release -cs)
+  cat > /etc/apt/sources.list.d/docker.list <<EOF
+deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu ${release} stable
+EOF
+  run apt update -y
+  # use noninteractive frontend to avoid prompts and possible sysv triggers
+  DEBIAN_FRONTEND=noninteractive run apt install -yq docker-ce docker-ce-cli containerd.io docker-compose-plugin || true
 
 else
-  dnf remove -y docker docker-client docker-common docker-latest || true
-  dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
-  dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin || true
+  run dnf remove -y docker docker-client docker-client-latest docker-common docker-latest docker-latest-logrotate docker-logrotate docker-engine || true
+  run dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo || true
+  run dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin || true
 fi
 
-systemctl daemon-reload || true
-systemctl enable docker || true
-systemctl start docker || true
+# start & enable docker in a safe way
+run systemctl daemon-reload || true
+run systemctl enable --now docker || true
 
-echo "Restoring sysv installer..."
-mv /usr/lib/systemd/systemd-sysv-install.bak /usr/lib/systemd/systemd-sysv-install 2>/dev/null || true
+# restore sysv binary (if we backed up)
+if [ -f "$SYSV_BACKUP" ]; then
+  log "Restoring $SYSV_BIN"
+  run mv "$SYSV_BACKUP" "$SYSV_BIN" 2>/dev/null || true
+fi
 
-echo "✅ Docker Installed Successfully!"
+# Add the invoking user (if not root) to docker group for convenience
+if [ "$SUDO_USER" ]; then
+  run usermod -aG docker "$SUDO_USER" || true
+fi
 
+# -----------------------------
+# Create install dir and generate compose file
+# -----------------------------
+log "Creating install directory: $INSTALL_DIR"
+run mkdir -p "$INSTALL_DIR"
+run chown "$SUDO_USER":"$SUDO_USER" "$INSTALL_DIR" 2>/dev/null || true
 
-#########################################
-# N8N + POSTGRES INSTALL
-#########################################
+# generate secure random password for postgres
+randpass() { tr -dc A-Za-z0-9 </dev/urandom | head -c 20 || true; }
 
-INSTALL_DIR="/opt/greathost-n8n"
-mkdir -p "$INSTALL_DIR"
+POSTGRES_PASSWORD="$(randpass)"
+POSTGRES_USER="n8n"
+POSTGRES_DB="n8n"
 
-rand() { tr -dc A-Za-z0-9 </dev/urandom | head -c 16; }
-
-POSTGRES_PASSWORD=$(rand)
-POSTGRES_USER=n8n
-POSTGRES_DB=n8n
-
-cat > "$INSTALL_DIR/docker-compose.yml" <<EOF
+log "Creating docker-compose.yml at $COMPOSE_FILE"
+cat > "$COMPOSE_FILE" <<EOF
+# GreatHost n8n docker-compose (auto-generated)
 version: "3.8"
 
 services:
@@ -165,86 +270,138 @@ services:
     image: postgres:13
     restart: unless-stopped
     environment:
-      POSTGRES_USER: $POSTGRES_USER
-      POSTGRES_PASSWORD: $POSTGRES_PASSWORD
-      POSTGRES_DB: $POSTGRES_DB
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
     volumes:
-      - data-postgres:/var/lib/postgresql/data
+      - gh_n8n_postgres:/var/lib/postgresql/data
     networks:
-      - gh-net
+      - gh_n8n_net
 
   n8n:
-    image: n8nio/n8n
+    image: n8nio/n8n:latest
     restart: unless-stopped
     environment:
-      DB_TYPE: postgresdb
-      DB_POSTGRESDB_HOST: postgres
-      DB_POSTGRESDB_PORT: 5432
-      DB_POSTGRESDB_DATABASE: $POSTGRES_DB
-      DB_POSTGRESDB_USERNAME: $POSTGRES_USER
-      DB_POSTGRESDB_PASSWORD: $POSTGRES_PASSWORD
-      N8N_BASIC_AUTH_ACTIVE: true
-      N8N_BASIC_AUTH_USER: "$n8n_user"
-      N8N_BASIC_AUTH_PASSWORD: "$n8n_pass"
-      N8N_HOST: "$domain"
-      N8N_PROTOCOL: https
-      N8N_PORT: 5678
-      N8N_EDITOR_BASE_URL: "https://$domain"
-EOF
-
-if [ -n "$tz" ]; then
-  echo "      GENERIC_TIMEZONE: $tz" >> "$INSTALL_DIR/docker-compose.yml"
-fi
-
-cat >> "$INSTALL_DIR/docker-compose.yml" <<'EOF'
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=${POSTGRES_DB}
+      - DB_POSTGRESDB_USERNAME=${POSTGRES_USER}
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=${N8N_USER}
+      - N8N_BASIC_AUTH_PASSWORD=${N8N_PASS}
+      - N8N_HOST=${DOMAIN}
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=https
+      - N8N_EDITOR_BASE_URL=https://${DOMAIN}
     ports:
       - "5678:5678"
     volumes:
-      - data-n8n:/home/node/.n8n
+      - gh_n8n_data:/home/node/.n8n
     depends_on:
       - postgres
     networks:
-      - gh-net
+      - gh_n8n_net
 
 volumes:
-  data-postgres:
-  data-n8n:
+  gh_n8n_postgres:
+  gh_n8n_data:
 
 networks:
-  gh-net:
+  gh_n8n_net:
     driver: bridge
 EOF
 
-cd "$INSTALL_DIR"
-docker compose pull || true
-docker compose up -d || true
+run chown "$SUDO_USER":"$SUDO_USER" "$COMPOSE_FILE" 2>/dev/null || true
 
+# -----------------------------
+# Start docker compose stack
+# -----------------------------
+log "Starting n8n stack with docker compose..."
+cd "$INSTALL_DIR" || fatal "Cannot cd to $INSTALL_DIR"
 
-#########################################
-# NGINX + SSL
-#########################################
+run docker compose pull || true
+run docker compose up -d || fatal "Failed to start docker compose stack. Check $LOGFILE and 'docker compose logs'."
 
-echo "Installing NGINX + SSL..."
+# quick check
+sleep 4
+run docker compose ps
 
-if [ "$OS" = "debian" ]; then
-  apt install -y nginx certbot python3-certbot-nginx
+# -----------------------------
+# Firewall: open ports (80,443) and optionally 5678 for direct access
+# -----------------------------
+log "Configuring firewall (open 80/443)."
+
+# ufw (Ubuntu) or firewalld (RHEL)
+if command -v ufw >/dev/null 2>&1; then
+  log "Detected ufw — allowing ports 80,443"
+  run ufw allow 80/tcp || true
+  run ufw allow 443/tcp || true
+  # don't enable ufw if it wasn't enabled before
+elif command -v firewall-cmd >/dev/null 2>&1; then
+  log "Detected firewalld — opening ports 80,443"
+  run firewall-cmd --permanent --add-service=http || true
+  run firewall-cmd --permanent --add-service=https || true
+  run firewall-cmd --reload || true
 else
-  dnf install -y nginx
-  systemctl enable --now nginx
-  dnf install -y snapd
-  systemctl enable --now snapd.socket
-  ln -s /var/lib/snapd/snap /snap 2>/dev/null || true
-  snap install core || true
-  snap install --classic certbot || true
-  ln -s /snap/bin/certbot /usr/bin/certbot 2>/dev/null || true
+  log "No ufw/firewalld detected — please ensure ports 80/443 are allowed by your provider firewall."
 fi
 
+# -----------------------------
+# SELinux: basic adjustments (RHEL-like)
+# -----------------------------
+if command -v getenforce >/dev/null 2>&1 && [ "$(getenforce)" != "Disabled" ]; then
+  log "SELinux active — applying httpd booleans for proxy"
+  # allow httpd to make network connections (nginx -> proxy to 127.0.0.1)
+  run setsebool -P httpd_can_network_connect 1 || true
+  run setsebool -P httpd_can_network_connect_db 1 || true
+  # set context for webroot
+  run chcon -R -t httpd_sys_rw_content_t /var/www/html || true
+fi
+
+# -----------------------------
+# NGINX + Certbot installation & config
+# -----------------------------
+log "Installing Nginx and Certbot..."
+
+if [ "$OS" = "debian" ]; then
+  run apt install -y nginx certbot python3-certbot-nginx || true
+  run systemctl enable --now nginx || true
+else
+  run dnf install -y nginx || true
+  run systemctl enable --now nginx || true
+
+  # certbot via snap is more reliable on RHEL-like
+  if ! command -v certbot >/dev/null 2>&1; then
+    log "Installing snapd & certbot (snap) for certbot on RHEL-like"
+    run dnf install -y snapd || true
+    run systemctl enable --now snapd.socket || true
+    run ln -s /var/lib/snapd/snap /snap 2>/dev/null || true
+    run snap install core || true
+    run snap refresh core || true
+    run snap install --classic certbot || true
+    run ln -s /snap/bin/certbot /usr/bin/certbot 2>/dev/null || true
+  fi
+fi
+
+# create minimal webroot for ACME challenges
+run mkdir -p /var/www/html
+run chown -R "$SUDO_USER":"$SUDO_USER" /var/www/html 2>/dev/null || true
+
+# Nginx reverse proxy config (HTTP) - certbot will modify for HTTPS
 NGINX_CONF="/etc/nginx/conf.d/greathost-n8n.conf"
+log "Writing Nginx config: $NGINX_CONF"
 
 cat > "$NGINX_CONF" <<EOF
 server {
     listen 80;
-    server_name $domain;
+    server_name ${DOMAIN} www.${DOMAIN};
+
+    # allow ACME challenge path
+    location /.well-known/acme-challenge/ {
+        root /var/www/html;
+    }
 
     location / {
         proxy_pass http://127.0.0.1:5678/;
@@ -252,41 +409,117 @@ server {
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
     }
 }
 EOF
 
-nginx -t && systemctl reload nginx
+run nginx -t || fatal "nginx configuration test failed"
+run systemctl reload nginx || true
 
-certbot --nginx -d "$domain" -m "$email" --agree-tos --non-interactive --redirect || true
+# -----------------------------
+# Validate DNS (best effort) before certbot
+# -----------------------------
+validate_dns || log "Proceeding even if DNS mismatch; certbot may fail until DNS records propagate."
 
-#########################################
-# SUCCESS MESSAGE
-#########################################
+# -----------------------------
+# Obtain SSL cert with Certbot (nginx plugin preferred)
+# -----------------------------
+log "Requesting Let's Encrypt certificate for $DOMAIN"
 
-clear
+if certbot --version >/dev/null 2>&1 && certbot --help | grep -q -- '--nginx'; then
+  # if nginx plugin available
+  run certbot --nginx -d "$DOMAIN" -d "www.$DOMAIN" --non-interactive --agree-tos -m "$EMAIL" --redirect || true
+else
+  # fallback to webroot method (works if nginx is serving /.well-known)
+  run certbot certonly --webroot -w /var/www/html -d "$DOMAIN" -d "www.$DOMAIN" --non-interactive --agree-tos -m "$EMAIL" || true
+  # create basic SSL-enabled nginx config if cert obtained
+  if [ -f /etc/letsencrypt/live/"$DOMAIN"/fullchain.pem ]; then
+    cat > "$NGINX_CONF" <<EOF
+server {
+    listen 80;
+    server_name ${DOMAIN} www.${DOMAIN};
+    return 301 https://\$host\$request_uri;
+}
+server {
+    listen 443 ssl;
+    server_name ${DOMAIN} www.${DOMAIN};
+
+    ssl_certificate /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:5678/;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+EOF
+    run nginx -t && run systemctl reload nginx || true
+  else
+    log "Certbot webroot method did not create cert - please check DNS and certbot logs in /var/log/letsencrypt"
+  fi
+fi
+
+# -----------------------------
+# Create cron for cert renewal (if certbot exists)
+# -----------------------------
+if command -v certbot >/dev/null 2>&1; then
+  log "Creating cron job for certbot renew (daily check)"
+  echo "0 3 * * * /usr/bin/certbot renew --quiet && systemctl reload nginx" > /etc/cron.d/greathost-certbot-renew
+fi
+
+# -----------------------------
+# Final health checks
+# -----------------------------
+log "Performing final health checks..."
+
+# check containers
+docker compose ps --format "table {{.Name}}\t{{.Status}}\t{{.Ports}}" | tee -a "$LOGFILE"
+
+# check local access
+if curl -fsS --max-time 6 http://127.0.0.1:5678/ >/dev/null 2>&1; then
+  log "n8n responded on localhost:5678"
+else
+  log "Warning: n8n didn't respond on localhost:5678 — check 'docker compose logs n8n'"
+fi
+
+# check nginx/https
+if curl -fsS --max-time 8 https://"${DOMAIN}"/ >/dev/null 2>&1; then
+  log "HTTPS check OK for https://${DOMAIN}"
+else
+  log "HTTPS check failed or not yet available. If DNS propagation is recent, wait a few minutes and retry."
+fi
+
+# -----------------------------
+# Output summary
+# -----------------------------
 cat <<EOF
 
-===========================================================
-🎉 GREAT HOST — N8N INSTALLED SUCCESSFULLY!
-===========================================================
-
-🌍 Domain: https://$domain
-👤 Username: $n8n_user
-🔐 Password: (hidden)
-📦 Install Directory: $INSTALL_DIR
-
-🐳 Manage n8n Containers:
-   cd $INSTALL_DIR && docker compose ps
-   cd $INSTALL_DIR && docker compose logs -f n8n
-
-🗄 Postgres:
-   DB: $POSTGRES_DB
-   User: $POSTGRES_USER
-   Pass: $POSTGRES_PASSWORD
-
-===========================================================
-Thank you for using GreatHost.in 🚀
-===========================================================
+${GREEN}============================================================${RESET}
+${GREEN}🎉 GreatHost — n8n Installed Successfully!${RESET}
+${YELLOW}Domain:${RESET} https://${DOMAIN}
+${YELLOW}n8n UI Basic Auth:${RESET} ${N8N_USER} / (the password you entered)
+${YELLOW}n8n Docker Compose path:${RESET} ${COMPOSE_FILE}
+${YELLOW}Postgres (container):${RESET} DB=${POSTGRES_DB} USER=${POSTGRES_USER} PASS=${POSTGRES_PASSWORD}
+${YELLOW}Logs:${RESET} sudo journalctl -u docker -n 200 ; docker compose logs -f n8n
+${GREEN}============================================================${RESET}
 
 EOF
+
+log "Installation finished. See $LOGFILE for details."
+
+# reminder about docker group
+if [ -n "$SUDO_USER" ]; then
+  echo
+  echo "Note: You were added to the docker group (if applicable). Logout and log back in for docker group changes to take effect for user: $SUDO_USER"
+fi
+
+exit 0
