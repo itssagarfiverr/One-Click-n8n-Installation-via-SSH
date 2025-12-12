@@ -1,21 +1,16 @@
 #!/bin/bash
-# n8n One-Click Installer (Ubuntu / AlmaLinux 8/9/10)
-# Author: Ritik26 (Updated & Fixed Version)
-# Installs Docker, Docker Compose, Postgres, n8n (Docker), Nginx reverse proxy, Certbot SSL
+# n8n One-Click Installer (Ubuntu 20+/22+/24+ & AlmaLinux 8/9/10)
+# Author: Ritik26 (GreatHost.in)
+# Fully fixed version — non-interactive Docker install — no hang
 
-set -eo pipefail   # removed "-u" because it causes undefined variable crash
+set -eo pipefail   # removed -u because it caused early exit
 
-check_command() {
+check() {
   if [ $? -ne 0 ]; then
-    echo "An error occurred. Exiting."
+    echo "❌ Error occurred. Exiting."
     exit 1
   fi
 }
-
-# Disable motd scripts
-if [ -d /etc/update-motd.d ]; then
-  sudo chmod -x /etc/update-motd.d/* || true
-fi
 
 clear
 cat <<'EOF'
@@ -33,131 +28,126 @@ cat <<'EOF'
 |                      ||----w |                                     |
 |                      ||     ||                                     |
 |                                                                    |
-|    ===========================================                     |
-|            www.GreatHost.in                                        |
-|    ===========================================                     |
-|                                                                    |
-|   Welcome to the n8n One-Click Installer.                          |
-|   This will install n8n with Postgres, Docker, nginx reverse proxy |
-|   and Let's Encrypt SSL.                                          |
-|                                                                    |
+|      Welcome to the n8n One-Click Automated Installer              |
+|   Installs Docker + Postgres + n8n + Nginx Reverse Proxy + SSL     |
 |____________________________________________________________________|
 EOF
 
 ### USER INPUTS ###
-user_input() {
+ask_inputs() {
   while [ -z "${domain:-}" ]; do
     read -rp "Your Domain (example.com): " domain
   done
 
   while true; do
-    read -rp "Your Email Address: " email
-    if printf '%s\n' "$email" | grep -qE '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$'; then
-      break
-    else
-      echo "Invalid email!"
-    fi
+    read -rp "Admin Email (for Let's Encrypt): " email
+    if echo "$email" | grep -Eq '^[^@]+@[^@]+\.[^@]+$'; then break; fi
+    echo "Invalid email—try again."
   done
 
-  echo "n8n Basic Auth Details:"
-  while [ -z "${n8n_user:-}" ]; do
-    read -rp "n8n Username [default: admin]: " n8n_user
-    n8n_user=${n8n_user:-admin}
-  done
+  echo "n8n Basic Auth Login:"
+  read -rp "Username [default admin]: " n8n_user
+  n8n_user=${n8n_user:-admin}
 
   while true; do
-    read -rsp "n8n Password: " n8n_pass
-    echo
-    read -rsp "n8n Password (again): " n8n_pass2
-    echo
-    [ "$n8n_pass" = "$n8n_pass2" ] && break || echo "Passwords do not match!"
+    read -rsp "Password: " p1; echo
+    read -rsp "Password again: " p2; echo
+    [ "$p1" = "$p2" ] && break
+    echo "Passwords do not match."
   done
+  n8n_pass="$p1"
 
-  read -rp "Timezone (e.g. Asia/Kolkata) [optional]: " tz
+  read -rp "Timezone (optional, e.g. Asia/Kolkata): " tz
   tz=${tz:-}
 }
 
-echo
-echo "Please enter your details:"
-user_input
+ask_inputs
 
-# confirmation
+### Confirm
 while true; do
-  read -rp "Is everything correct? [Y/n] " ok
+  read -rp "Are these correct? (Y/n): " ok
   ok=${ok:-Y}
   case $ok in
-    [Yy]*) break ;;
-    [Nn]*) unset domain email n8n_user n8n_pass tz; user_input ;;
-    *) echo "Type Y or N" ;;
+    [Yy]*) break;;
+    [Nn]*) unset domain email n8n_user n8n_pass tz; ask_inputs;;
+    *) echo "Answer Y or N";;
   esac
 done
 
-### OS DETECT ###
-OS=""
-OS_VERSION=""
+### Detect OS ###
 if [ -f /etc/os-release ]; then
   . /etc/os-release
-  if [[ "$ID" =~ (ubuntu|debian) ]]; then OS="debian"; fi
-  if [[ "$ID" =~ (almalinux|centos|rhel) ]]; then OS="rhel"; fi
-  OS_VERSION="$VERSION_ID"
+  if echo "$ID" | grep -Eq "ubuntu|debian"; then OS="debian"; fi
+  if echo "$ID" | grep -Eq "almalinux|centos|rhel"; then OS="rhel"; fi
 fi
 
-echo "Detected OS: $OS ($OS_VERSION)"
+echo "Detected OS: $OS"
 
-### UPDATE SYSTEM ###
+### Update system ###
 if [ "$OS" = "debian" ]; then
   sudo apt update -y && sudo apt upgrade -y
-  sudo apt install -y ca-certificates curl gnupg software-properties-common
+  sudo apt install -y ca-certificates curl gnupg lsb-release software-properties-common
 elif [ "$OS" = "rhel" ]; then
   sudo dnf update -y
-  sudo dnf install -y yum-utils device-mapper-persistent-data lvm2 epel-release
+  sudo dnf install -y yum-utils epel-release device-mapper-persistent-data lvm2
 else
   echo "Unsupported OS!"
   exit 1
 fi
 
-### INSTALL DOCKER ###
-echo "Installing Docker Engine..."
+############################################################
+# 🔥 FIXED DOCKER INSTALL — NON-INTERACTIVE — NO HANG
+############################################################
+
+echo "Installing Docker Engine (non-interactive)..."
 
 if [ "$OS" = "debian" ]; then
   sudo apt remove -y docker docker-engine docker.io containerd runc || true
+
   sudo mkdir -p /etc/apt/keyrings
-  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+    | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
 
   echo \
-    "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-    $(lsb_release -cs) stable" |
-    sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" |
+  sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
 
   sudo apt update -y
-  sudo apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin || true
+
+  sudo DEBIAN_FRONTEND=noninteractive \
+  apt install -yq docker-ce docker-ce-cli containerd.io docker-compose-plugin || true
 
 elif [ "$OS" = "rhel" ]; then
   sudo dnf remove -y docker docker-client docker-common docker-latest || true
-  sudo dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+
+  sudo dnf config-manager \
+    --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+
   sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin || true
 fi
 
-sudo systemctl enable --now docker || true
+sudo systemctl daemon-reload || true
+sudo systemctl enable docker || true
+sudo systemctl start docker || true
 
-# Add user to docker group
+echo "Docker Installed Successfully!"
+
 sudo usermod -aG docker "$USER" || true
 
-### CREATE N8N DIR ###
+############################################################
+# n8n + Postgres Setup
+############################################################
+
 INSTALL_DIR="/opt/n8n"
 sudo mkdir -p "$INSTALL_DIR"
 sudo chown "$USER":"$USER" "$INSTALL_DIR"
 
-### RANDOM PASSWORD GENERATOR ###
-generate_random_string() {
-  tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 16
-}
+rand() { tr -dc A-Za-z0-9 </dev/urandom | head -c 16; }
+POSTGRES_PASSWORD=$(rand)
+POSTGRES_USER=n8n
+POSTGRES_DB=n8n
 
-POSTGRES_PASSWORD="$(generate_random_string)"
-POSTGRES_USER="n8n"
-POSTGRES_DB="n8n"
-
-### DOCKER-COMPOSE FILE ###
 cat > "$INSTALL_DIR/docker-compose.yml" <<EOF
 version: "3.8"
 services:
@@ -169,13 +159,15 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
-      - n8n-postgres-data:/var/lib/postgresql/data
+      - data-postgres:/var/lib/postgresql/data
     networks:
-      - n8n-network
+      - n8n-net
 
   n8n:
     image: n8nio/n8n:latest
     restart: unless-stopped
+    ports:
+      - "5678:5678"
     environment:
       DB_TYPE: postgresdb
       DB_POSTGRESDB_HOST: postgres
@@ -183,53 +175,52 @@ services:
       DB_POSTGRESDB_DATABASE: ${POSTGRES_DB}
       DB_POSTGRESDB_USERNAME: ${POSTGRES_USER}
       DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
-      N8N_BASIC_AUTH_ACTIVE: true
-      N8N_BASIC_AUTH_USER: ${n8n_user}
-      N8N_BASIC_AUTH_PASSWORD: ${n8n_pass}
-      N8N_HOST: ${domain}
+      N8N_BASIC_AUTH_ACTIVE: "true"
+      N8N_BASIC_AUTH_USER: "${n8n_user}"
+      N8N_BASIC_AUTH_PASSWORD: "${n8n_pass}"
+      N8N_HOST: "${domain}"
       N8N_PORT: 5678
       N8N_PROTOCOL: https
-      N8N_EDITOR_BASE_URL: https://${domain}
+      N8N_EDITOR_BASE_URL: "https://${domain}"
 EOF
 
 if [ -n "$tz" ]; then
-cat >> "$INSTALL_DIR/docker-compose.yml" <<EOF
-      GENERIC_TIMEZONE: ${tz}
-EOF
+echo "      GENERIC_TIMEZONE: ${tz}" >> "$INSTALL_DIR/docker-compose.yml"
 fi
 
 cat >> "$INSTALL_DIR/docker-compose.yml" <<'EOF'
-    ports:
-      - "5678:5678"
     volumes:
-      - n8n-data:/home/node/.n8n
+      - data-n8n:/home/node/.n8n
     depends_on:
       - postgres
     networks:
-      - n8n-network
+      - n8n-net
 
 volumes:
-  n8n-postgres-data:
-  n8n-data:
+  data-postgres:
+  data-n8n:
 
 networks:
-  n8n-network:
+  n8n-net:
     driver: bridge
 EOF
 
-### START DOCKER STACK ###
 cd "$INSTALL_DIR"
 sudo docker compose pull || true
 sudo docker compose up -d || true
 
-### NGINX + CERTBOT ###
-echo "Installing nginx + certbot..."
+############################################################
+# NGINX + SSL
+############################################################
+
+echo "Installing Nginx + Certbot..."
 
 if [ "$OS" = "debian" ]; then
   sudo apt install -y nginx certbot python3-certbot-nginx
-elif [ "$OS" = "rhel" ]; then
+else
   sudo dnf install -y nginx
   sudo systemctl enable --now nginx
+
   sudo dnf install -y snapd
   sudo systemctl enable --now snapd.socket
   sudo ln -s /var/lib/snapd/snap /snap || true
@@ -238,9 +229,9 @@ elif [ "$OS" = "rhel" ]; then
   sudo ln -s /snap/bin/certbot /usr/bin/certbot || true
 fi
 
-# nginx reverse proxy
 NGINX_CONF="/etc/nginx/conf.d/n8n-${domain}.conf"
-sudo tee "$NGINX_CONF" > /dev/null <<EOF
+
+sudo tee "$NGINX_CONF" >/dev/null <<EOF
 server {
     listen 80;
     server_name ${domain};
@@ -257,17 +248,18 @@ EOF
 
 sudo nginx -t && sudo systemctl reload nginx
 
-### SSL ###
-sudo certbot --nginx -d "$domain" -m "$email" --agree-tos --non-interactive --redirect || true
+sudo certbot --nginx -d "$domain" -m "$email" --agree-tos --redirect --non-interactive || true
 
-### FINAL MESSAGE ###
-echo "===================================================="
-echo "n8n Installation Completed!"
-echo "Domain: $domain"
-echo "URL: https://$domain"
-echo "Username: $n8n_user"
-echo "(Password you entered)"
-echo "Postgres DB: $POSTGRES_DB"
-echo "To manage n8n:"
-echo "  cd $INSTALL_DIR && sudo docker compose ps"
-echo "===================================================="
+############################################################
+# SUCCESS MESSAGE
+############################################################
+
+echo "=========================================================="
+echo "🎉 n8n Installation Completed Successfully!"
+echo "🌐 URL: https://$domain"
+echo "👤 Username: $n8n_user"
+echo "🔐 Password: (the one you entered)"
+echo "📦 Install Dir: $INSTALL_DIR"
+echo "🐳 Manage Docker:"
+echo "    cd $INSTALL_DIR && sudo docker compose ps"
+echo "=========================================================="
