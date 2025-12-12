@@ -68,7 +68,7 @@ Once the installer starts, you will be asked for:
 **Example Prompt Preview:**
 (Replace this with a real screenshot later)
 
-![Prompt Screenshot](https://i.ibb.co/7k7dCcy/sample.png)
+![Prompt Screenshot](https://i.ibb.co/cK78SVRB/image.png)
 
 ---
 
