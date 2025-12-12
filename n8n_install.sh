@@ -1,7 +1,7 @@
 #!/bin/bash
 # n8n One-Click Installer (Ubuntu 20+/22+/24+ & AlmaLinux 8/9/10)
-# Author: Ritik26 (GreatHost.in)
-# Fully fixed version — sysv patch — no Docker hang
+# Author: Ritik26 / GreatHost.in
+# Fully fixed version with sysv patch, branding and cow ASCII banner
 
 set -eo pipefail
 
@@ -9,11 +9,27 @@ check() { if [ $? -ne 0 ]; then echo "❌ Error occurred. Exiting."; exit 1; fi;
 
 clear
 cat <<'EOF'
-=====================================================================
-🚀 GREAT HOST - N8N ONE CLICK INSTALLER
-=====================================================================
- Installs: Docker + Docker Compose + Postgres + n8n + Nginx + SSL
-=====================================================================
+ ____________________________________________________________________
+|                                                                    |
+|    ===========================================                     |
+|    ::..𝐓𝐡i𝐬 𝐬𝐞𝐫𝐯𝐞𝐫 𝐢𝐬 𝐬𝐞𝐭 𝐛𝐲 GreatHost.in...::               |
+|    ===========================================                     |
+|       ___________                                                  |
+|       < GreatHost >                                                |
+|       -----------                                                  |
+|              \   ^__^                                              |
+|               \  (oo)\_______                                      |
+|                  (__)\       )\/\                                  |
+|                      ||----w |                                     |
+|                      ||     ||                                     |
+|                                                                    |
+|    ===========================================                     |
+|            www.GreatHost.in                                        |
+|    ===========================================                     |
+|                                                                    |
+|      Welcome to the GreatHost n8n One-Click Automated Installer    |
+|   Installs: Docker + Postgres + n8n + Nginx Reverse Proxy + SSL    |
+|____________________________________________________________________|
 EOF
 
 ##############################
@@ -26,9 +42,9 @@ ask_inputs() {
   done
 
   while true; do
-    read -rp "Admin Email (for SSL): " email
+    read -rp "Admin Email (for Let's Encrypt): " email
     if echo "$email" | grep -Eq '^[^@]+@[^@]+\.[^@]+$'; then break; fi
-    echo "Invalid email!"
+    echo "Invalid email—try again."
   done
 
   read -rp "n8n Username [default admin]: " n8n_user
@@ -49,7 +65,7 @@ ask_inputs() {
 ask_inputs
 
 while true; do
-  read -rp "Confirm? (Y/n): " ok
+  read -rp "Confirm details and proceed? (Y/n): " ok
   ok=${ok:-Y}
   case $ok in
     [Yy]*) break ;;
@@ -62,10 +78,14 @@ done
 # OS DETECT
 ##############################
 
-. /etc/os-release
-
-if echo "$ID" | grep -Eq "ubuntu|debian"; then OS="debian"; fi
-if echo "$ID" | grep -Eq "almalinux|centos|rhel"; then OS="rhel"; fi
+if [ -f /etc/os-release ]; then
+  . /etc/os-release
+  if echo "$ID" | grep -Eq "ubuntu|debian"; then OS="debian"; fi
+  if echo "$ID" | grep -Eq "almalinux|centos|rhel"; then OS="rhel"; fi
+else
+  echo "Unsupported OS. Exiting."
+  exit 1
+fi
 
 echo "Detected OS: $OS"
 
@@ -74,11 +94,11 @@ echo "Detected OS: $OS"
 ##############################
 
 if [ "$OS" = "debian" ]; then
-  apt update -y && apt upgrade -y
-  apt install -y ca-certificates curl gnupg lsb-release software-properties-common
+  sudo apt update -y && sudo apt upgrade -y
+  sudo apt install -y ca-certificates curl gnupg lsb-release software-properties-common
 elif [ "$OS" = "rhel" ]; then
-  dnf update -y
-  dnf install -y yum-utils epel-release device-mapper-persistent-data lvm2
+  sudo dnf update -y
+  sudo dnf install -y yum-utils epel-release device-mapper-persistent-data lvm2
 fi
 
 ##############################
@@ -95,43 +115,41 @@ fi
 # INSTALL DOCKER (non-interactive)
 ##############################
 
-echo "Installing Docker Engine..."
+echo "Installing Docker Engine (non-interactive)..."
 
 if [ "$OS" = "debian" ]; then
 
-  apt remove -y docker docker-engine docker.io containerd runc || true
+  sudo apt remove -y docker docker-engine docker.io containerd runc || true
 
-  mkdir -p /etc/apt/keyrings
+  sudo mkdir -p /etc/apt/keyrings
   curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
-    | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
 
   echo \
 "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
-https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
-  > /etc/apt/sources.list.d/docker.list
+https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" |
+  sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
 
-  apt update -y
+  sudo apt update -y
 
-  DEBIAN_FRONTEND=noninteractive apt install -yq \
-    docker-ce docker-ce-cli containerd.io docker-compose-plugin || true
+  sudo DEBIAN_FRONTEND=noninteractive apt install -yq docker-ce docker-ce-cli containerd.io docker-compose-plugin || true
 
 elif [ "$OS" = "rhel" ]; then
 
-  dnf remove -y docker docker-client docker-common docker-latest || true
+  sudo dnf remove -y docker docker-client docker-common docker-latest || true
 
-  dnf config-manager \
-    --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+  sudo dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
 
-  dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin || true
+  sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin || true
 
 fi
 
-systemctl daemon-reload || true
-systemctl enable docker || true
-systemctl start docker || true
+sudo systemctl daemon-reload || true
+sudo systemctl enable docker || true
+sudo systemctl start docker || true
 
-echo "Restoring sysv install binary..."
-mv /usr/lib/systemd/systemd-sysv-install.bak /usr/lib/systemd/systemd-sysv-install 2>/dev/null || true
+echo "Restoring sysv install binary (if any)..."
+sudo mv /usr/lib/systemd/systemd-sysv-install.bak /usr/lib/systemd/systemd-sysv-install 2>/dev/null || true
 
 echo "🎉 Docker Installed Successfully! (No Hang Guaranteed)"
 
@@ -139,14 +157,15 @@ echo "🎉 Docker Installed Successfully! (No Hang Guaranteed)"
 # n8n + POSTGRES SETUP
 ##############################
 
-INSTALL_DIR="/opt/n8n"
-mkdir -p "$INSTALL_DIR"
+INSTALL_DIR="/opt/greathost-n8n"
+sudo mkdir -p "$INSTALL_DIR"
+sudo chown "$USER":"$USER" "$INSTALL_DIR"
 
 rand() { tr -dc A-Za-z0-9 </dev/urandom | head -c 16; }
 
 POSTGRES_PASSWORD=$(rand)
-POSTGRES_USER=n8n
-POSTGRES_DB=n8n
+POSTGRES_USER=greathost_n8n
+POSTGRES_DB=greathost_n8n
 
 cat > "$INSTALL_DIR/docker-compose.yml" <<EOF
 version: "3.8"
@@ -162,7 +181,7 @@ services:
     volumes:
       - data-postgres:/var/lib/postgresql/data
     networks:
-      - n8n-net
+      - gh-net
 
   n8n:
     image: n8nio/n8n:latest
@@ -195,47 +214,51 @@ cat >> "$INSTALL_DIR/docker-compose.yml" <<'EOF'
     depends_on:
       - postgres
     networks:
-      - n8n-net
+      - gh-net
 
 volumes:
   data-postgres:
   data-n8n:
 
 networks:
-  n8n-net:
+  gh-net:
     driver: bridge
 EOF
 
 cd "$INSTALL_DIR"
-docker compose pull || true
-docker compose up -d || true
+sudo docker compose pull || true
+sudo docker compose up -d || true
 
 ##############################
 # NGINX + SSL
 ##############################
 
-echo "Installing NGINX + Certbot"
+echo "Installing Nginx + Certbot..."
 
 if [ "$OS" = "debian" ]; then
-  apt install -y nginx certbot python3-certbot-nginx
+  sudo apt install -y nginx certbot python3-certbot-nginx
 else
-  dnf install -y nginx
-  systemctl enable --now nginx
+  sudo dnf install -y nginx
+  sudo systemctl enable --now nginx
 
-  dnf install -y snapd
-  systemctl enable --now snapd.socket
-  ln -s /var/lib/snapd/snap /snap || true
-  snap install core || true
-  snap install --classic certbot || true
-  ln -s /snap/bin/certbot /usr/bin/certbot || true
+  sudo dnf install -y snapd
+  sudo systemctl enable --now snapd.socket
+  sudo ln -s /var/lib/snapd/snap /snap 2>/dev/null || true
+  sudo snap install core || true
+  sudo snap install --classic certbot || true
+  sudo ln -s /snap/bin/certbot /usr/bin/certbot 2>/dev/null || true
 fi
 
-NGINX_CONF="/etc/nginx/conf.d/n8n-${domain}.conf"
+NGINX_CONF="/etc/nginx/conf.d/greathost-n8n-${domain}.conf"
 
-cat > "$NGINX_CONF" <<EOF
+sudo tee "$NGINX_CONF" >/dev/null <<EOF
 server {
     listen 80;
     server_name ${domain};
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/html;
+    }
 
     location / {
         proxy_pass http://127.0.0.1:5678/;
@@ -243,24 +266,52 @@ server {
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
     }
 }
 EOF
 
-nginx -t && systemctl reload nginx
+sudo nginx -t && sudo systemctl reload nginx
 
-certbot --nginx -d "$domain" -m "$email" --agree-tos --redirect --non-interactive || true
+sudo certbot --nginx -d "$domain" -m "$email" --agree-tos --redirect --non-interactive || true
 
 ##############################
-# SUCCESS MESSAGE
+# POST-INSTALL: health page & cron
 ##############################
 
-echo "==========================================================="
-echo "🎉 n8n Installed Successfully!"
-echo "🌐 URL: https://$domain"
-echo "👤 Username: $n8n_user"
-echo "🔐 Password: (hidden)"
-echo "📁 Install Directory: $INSTALL_DIR"
-echo "🐳 Manage n8n:"
-echo "    cd $INSTALL_DIR && docker compose ps"
-echo "==========================================================="
+sudo mkdir -p /var/www/html
+sudo chown -R "$USER":"$USER" /var/www/html
+
+if command -v certbot >/dev/null 2>&1; then
+  echo "0 3 * * * /usr/bin/certbot renew --quiet && systemctl reload nginx" | sudo tee /etc/cron.d/greathost-certbot-renew >/dev/null
+fi
+
+##############################
+# SUCCESS MESSAGE WITH BRAND
+##############################
+
+cat <<'OUT'
+
+===========================================================
+🎉 GreatHost n8n Installed Successfully!
+🌐 URL: https://${domain}
+👤 Username: ${n8n_user}
+🔐 Password: (the one you entered)
+📁 Install Directory: ${INSTALL_DIR}
+🐳 Manage n8n Docker:
+    cd ${INSTALL_DIR} && sudo docker compose ps
+📦 Postgres:
+    DB: ${POSTGRES_DB}
+    User: ${POSTGRES_USER}
+    Password: ${POSTGRES_PASSWORD}
+===========================================================
+
+OUT
+
+# Friendly reminder
+echo "Note: if you added your user to the docker group, you may need to re-login for group changes to apply."
+echo "If HTTPS didn't configure automatically, check /var/log/letsencrypt and nginx config."
+
+# End of script - GreatHost
