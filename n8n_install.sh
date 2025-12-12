@@ -8,7 +8,7 @@ set -eo pipefail
 check() { if [ $? -ne 0 ]; then echo "❌ Error occurred. Exiting."; exit 1; fi; }
 
 clear
-cat <<'EOF'
+cat <<EOF
  ____________________________________________________________________
 |                                                                    |
 |    ===========================================                     |
